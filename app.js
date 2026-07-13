@@ -3,11 +3,7 @@
 const OTHER = ME === "anton" ? "amir" : "anton";
 const NAMES = { anton: "Антон", amir: "Амир" };
 
-firebase.initializeApp(FIREBASE_CONFIG);
-const db = firebase.firestore();
-
-const presenceCol = db.collection("presence");
-const sessionsCol = db.collection("sessions");
+const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 const els = {
   conn: document.getElementById("conn"),
@@ -20,43 +16,43 @@ const els = {
 let state = { anton: null, amir: null };
 let tickHandle = null;
 
-// ---------- realtime listeners ----------
+// ---------- initial load ----------
 
-presenceCol.onSnapshot(
-  (snap) => {
-    els.conn.textContent = "online";
-    els.conn.classList.add("live");
-    snap.docChanges().forEach((change) => {
-      const id = change.doc.id;
-      if (id === "anton" || id === "amir") state[id] = change.doc.data();
-    });
-    render();
-  },
-  (err) => {
-    console.error("presence listener error", err);
+async function loadInitial() {
+  const { data: rows, error } = await sb.from("presence").select("*");
+  if (error) {
+    console.error(error);
     els.conn.textContent = "offline";
-    els.conn.classList.remove("live");
+    return;
   }
-);
+  rows.forEach((row) => (state[row.id] = row));
+  render();
 
-sessionsCol
-  .orderBy("start", "desc")
-  .limit(15)
-  .onSnapshot((snap) => {
-    els.history.innerHTML = "";
-    snap.forEach((doc) => {
-      const d = doc.data();
-      if (!d.start || !d.end) return;
-      const mins = Math.max(1, Math.round((d.end.toMillis() - d.start.toMillis()) / 60000));
-      const dt = d.start.toDate();
-      const dateStr = dt.toLocaleDateString("ru-RU", { day: "2-digit", month: "2-digit" });
-      const timeStr = dt.toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" });
-      const row = document.createElement("div");
-      row.className = "log-entry";
-      row.innerHTML = `<span><b>${NAMES[d.user] || d.user}</b> · ${dateStr} ${timeStr}</span><span>${mins} мин</span>`;
-      els.history.appendChild(row);
-    });
+  const { data: sessions } = await sb
+    .from("sessions")
+    .select("*")
+    .order("start", { ascending: false })
+    .limit(15);
+  renderHistory(sessions || []);
+}
+
+// ---------- realtime ----------
+
+sb.channel("presence-sync")
+  .on("postgres_changes", { event: "*", schema: "public", table: "presence" }, (payload) => {
+    if (payload.new) state[payload.new.id] = payload.new;
+    render();
+  })
+  .on("postgres_changes", { event: "INSERT", schema: "public", table: "sessions" }, (payload) => {
+    prependHistory(payload.new);
+  })
+  .subscribe((status) => {
+    const live = status === "SUBSCRIBED";
+    els.conn.textContent = live ? "online" : "offline";
+    els.conn.classList.toggle("live", live);
   });
+
+loadInitial();
 
 // ---------- rendering ----------
 
@@ -70,7 +66,7 @@ function render() {
     tile.classList.toggle(`who-${who}`, true);
 
     if (active && data.since) {
-      line.dataset.since = data.since.toMillis();
+      line.dataset.since = new Date(data.since).getTime();
     } else {
       delete line.dataset.since;
       line.textContent = "простаивает";
@@ -101,6 +97,27 @@ function tick() {
   });
 }
 
+function renderHistory(rows) {
+  els.history.innerHTML = "";
+  rows.forEach((row) => appendHistoryEl(row, "append"));
+}
+
+function prependHistory(row) {
+  appendHistoryEl(row, "prepend");
+}
+
+function appendHistoryEl(row, position) {
+  if (!row || !row.start || !row.end) return;
+  const mins = Math.max(1, Math.round((new Date(row.end) - new Date(row.start)) / 60000));
+  const dt = new Date(row.start);
+  const dateStr = dt.toLocaleDateString("ru-RU", { day: "2-digit", month: "2-digit" });
+  const timeStr = dt.toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" });
+  const el = document.createElement("div");
+  el.className = "log-entry";
+  el.innerHTML = `<span><b>${NAMES[row.user] || row.user}</b> · ${dateStr} ${timeStr}</span><span>${mins} мин</span>`;
+  els.history[position](el);
+}
+
 // ---------- toggle action ----------
 
 if (els.btn) {
@@ -111,65 +128,43 @@ if (els.btn) {
       const turningOn = !mine.active;
 
       if (turningOn) {
-        await presenceCol.doc(ME).set(
-          { active: true, since: firebase.firestore.FieldValue.serverTimestamp(), name: NAMES[ME] },
-          { merge: true }
-        );
-        notifyOther(`${NAMES[ME]} сел за Claude`, "Кто-то занял лимиты 👀");
+        const since = new Date().toISOString();
+        const { error } = await sb
+          .from("presence")
+          .update({ active: true, since, name: NAMES[ME] })
+          .eq("id", ME);
+        if (error) throw error;
+        state[ME] = { ...state[ME], active: true, since };
+        notifyOther(`${NAMES[ME]} сел за Claude`);
       } else {
-        const startedAt = mine.since ? mine.since.toDate() : new Date();
-        await sessionsCol.add({
-          user: ME,
-          start: firebase.firestore.Timestamp.fromDate(startedAt),
-          end: firebase.firestore.FieldValue.serverTimestamp(),
-        });
-        await presenceCol.doc(ME).set({ active: false }, { merge: true });
+        const endedAt = new Date().toISOString();
+        const startedAt = mine.since || endedAt;
+        const { error: e1 } = await sb
+          .from("sessions")
+          .insert({ user: ME, start: startedAt, end: endedAt });
+        if (e1) throw e1;
+        const { error: e2 } = await sb.from("presence").update({ active: false }).eq("id", ME);
+        if (e2) throw e2;
       }
     } catch (e) {
       console.error(e);
-      alert("Не получилось обновить статус. Проверь конфиг и правила Firestore.");
+      alert("Не получилось обновить статус. Проверь config.js и SQL-политики в Supabase.");
     } finally {
       els.btn.disabled = false;
     }
   });
 }
 
-// ---------- push notifications ----------
+// ---------- push через ntfy.sh (без бэкенда) ----------
 
-async function notifyOther(title, body) {
-  const otherToken = state[OTHER] && state[OTHER].fcmToken;
-  if (!otherToken || !APPS_SCRIPT_URL || APPS_SCRIPT_URL.includes("ВСТАВЬ_СЮДА")) return;
+async function notifyOther(text) {
+  if (!NTFY_TOPIC || NTFY_TOPIC.includes("ВСТАВЬ_СЮДА")) return;
   try {
-    await fetch(APPS_SCRIPT_URL, {
+    await fetch(`https://ntfy.sh/${encodeURIComponent(NTFY_TOPIC)}`, {
       method: "POST",
-      headers: { "Content-Type": "text/plain;charset=utf-8" }, // избегаем preflight OPTIONS для Apps Script
-      body: JSON.stringify({ token: otherToken, title, body, secret: SHARED_SECRET }),
+      body: text, // кириллица идёт в теле запроса, не в заголовке — так UTF-8 не ломается
     });
   } catch (e) {
-    console.warn("push relay failed", e);
+    console.warn("ntfy push failed", e);
   }
 }
-
-async function setupMessaging() {
-  if (!("Notification" in window) || !firebase.messaging.isSupported()) return;
-  try {
-    const reg = await navigator.serviceWorker.register("sw.js");
-    const permission = await Notification.requestPermission();
-    if (permission !== "granted") return;
-
-    const messaging = firebase.messaging();
-    const token = await messaging.getToken({ vapidKey: VAPID_KEY, serviceWorkerRegistration: reg });
-    if (token) {
-      await presenceCol.doc(ME).set({ fcmToken: token, name: NAMES[ME] }, { merge: true });
-    }
-
-    messaging.onMessage((payload) => {
-      const { title, body } = payload.notification || payload.data || {};
-      if (title) new Notification(title, { body, icon: "icons/icon-180.png" });
-    });
-  } catch (e) {
-    console.warn("messaging setup failed (нормально в http:// или в браузере без пуш-разрешений)", e);
-  }
-}
-
-setupMessaging();
