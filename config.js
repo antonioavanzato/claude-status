@@ -3,7 +3,7 @@
 // ==========================================================
 
 // 1) Supabase-проект (Project Settings → API)
-const SUPABASE_URL = "ВСТАВЬ_СЮДА"; // например https://xxxx.supabase.co
+const SUPABASE_URL = "https://iuafxfltuxhxjjtdisjz.supabase.co"; // например https://xxxx.supabase.co
 const SUPABASE_ANON_KEY = "ВСТАВЬ_СЮДА"; // "anon public" ключ, НЕ service_role
 
 // 2) Топик в ntfy.sh — придумай длинную случайную строку, известную только вам двоим.
