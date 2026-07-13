@@ -8,7 +8,7 @@ const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
 
 // 2) Топик в ntfy.sh — придумай длинную случайную строку, известную только вам двоим.
 //    Оба ставите приложение ntfy (App Store) и подписываетесь на этот же топик.
-const NTFY_TOPIC = "ВСТАВЬ_СЮДА"; // например antonamir-claude-8f2k1x
+const NTFY_TOPIC = "claude-status-x7k2m9qp4v"; // например antonamir-claude-8f2k1x
 
 // 3) Кто есть кто в этом приложении. "me" — за кем из двух закреплено это устройство.
 //    На телефоне Антона поставь "anton", на телефоне Амира — "amir".
